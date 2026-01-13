@@ -1,0 +1,32 @@
+{
+  "backbone": "tf_efficientnetv2_m",
+  "pretrained": true,
+  "dropout": 0.5,
+  "head_hidden_dim": 512,
+  "constraint_mode": "none",
+  "constraint_weight": 0.0,
+  "loss_function": "huber",
+  "huber_delta": 2.0,
+  "task_weights": {
+    "Dry_Clover_g": 1.75,
+    "Dry_Dead_g": 0.75,
+    "Dry_Green_g": 1.0,
+    "Dry_Total_g": 1.0,
+    "GDM_g": 1.75
+  },
+  "optimizer": "rmsprop",
+  "learning_rate": 0.0003285774637085397,
+  "weight_decay": 2.0880951364850065e-06,
+  "momentum": 0.9,
+  "scheduler": "step",
+  "scheduler_patience": 5,
+  "augmentation_level": "conservative",
+  "image_size": 512,
+  "batch_size": 32,
+  "num_epochs": 50,
+  "early_stopping_patience": 10,
+  "num_workers": 4,
+  "seed": 42,
+  "stratify_by": "state",
+  "val_split": 0.2
+}

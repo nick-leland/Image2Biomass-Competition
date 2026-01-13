@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Competition Data
+csiro-biomass.zip
+train/
+test/
+*.csv
+
+# Experiments
+experiments/checkpoints*/
+experiments/logs/
+experiments/temp/
+*.pth
+*.pt
+
+# Zone Identifier files (Windows)
+*:Zone.Identifier

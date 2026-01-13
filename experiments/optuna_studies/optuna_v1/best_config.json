@@ -1,0 +1,32 @@
+{
+  "backbone": "resnet50",
+  "pretrained": true,
+  "dropout": 0.1,
+  "head_hidden_dim": 256,
+  "constraint_mode": "none",
+  "constraint_weight": 0.0,
+  "loss_function": "huber",
+  "huber_delta": 2.0,
+  "task_weights": {
+    "Dry_Clover_g": 1.25,
+    "Dry_Dead_g": 0.75,
+    "Dry_Green_g": 1.25,
+    "Dry_Total_g": 1.5,
+    "GDM_g": 0.75
+  },
+  "optimizer": "adamw",
+  "learning_rate": 0.0006203797672208218,
+  "weight_decay": 0.00010010013128122144,
+  "momentum": 0.9,
+  "scheduler": "plateau",
+  "scheduler_patience": 3,
+  "augmentation_level": "aggressive",
+  "image_size": 384,
+  "batch_size": 16,
+  "num_epochs": 50,
+  "early_stopping_patience": 10,
+  "num_workers": 4,
+  "seed": 42,
+  "stratify_by": "state",
+  "val_split": 0.2
+}
