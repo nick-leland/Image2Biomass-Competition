@@ -57,9 +57,38 @@ uv pip install pandas scikit-learn matplotlib pillow
 uv pip install albumentations  # for image augmentation
 ```
 
-## Development Workflow
+## Git Workflow
 
-Since this is a Kaggle competition repository with no existing code yet:
+**IMPORTANT**: Follow this branching strategy:
+
+1. **DEV Branch**: Continuously commit all work-in-progress to the `dev` branch
+   - Commit frequently as you make progress
+   - Push regularly to keep remote updated
+   - This is the active development branch
+
+2. **Main Branch**: Merge to `main` only when making a Kaggle submission
+   - Main should only contain code that has been submitted to the competition
+   - Each merge to main represents a competition submission milestone
+   - Tag merges with submission scores when available
+
+**Example workflow**:
+```bash
+# Working on improvements
+git checkout dev
+git add .
+git commit -m "Add feature X"
+git push origin dev
+
+# Ready to submit
+git checkout main
+git merge dev
+git push origin main
+# Submit to Kaggle, then tag with score
+git tag -a "submission-v2-score-0.25" -m "EfficientNetV2-M with TTA"
+git push origin --tags
+```
+
+## Development Workflow
 
 1. **Exploratory Data Analysis**: Start with EDA notebooks to understand image characteristics, target distributions, and correlations between features
 2. **Baseline Model**: Build simple baseline (e.g., linear regression on image features)
