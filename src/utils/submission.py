@@ -55,50 +55,96 @@ def predict_on_test_set(model, test_loader, device='cuda', denormalize_fn=None):
 
 
 def apply_constraint_enforcement(predictions: Dict[str, Dict[str, float]],
-                                 method: str = 'average') -> Dict[str, Dict[str, float]]:
+                                 method: str = 'biological') -> Dict[str, Dict[str, float]]:
     """
-    Enforce constraint: Dry_Total = Dry_Clover + Dry_Dead + Dry_Green
+    Enforce biological constraints on biomass predictions.
+
+    Biological relationships:
+        - GDM_g = Dry_Green_g + Dry_Clover_g (Green Dry Matter)
+        - Dry_Total_g = GDM_g + Dry_Dead_g = Dry_Green_g + Dry_Clover_g + Dry_Dead_g
 
     Args:
         predictions: Dict mapping image_id to dict of target predictions
-        method: Enforcement method ('average', 'trust_model', 'hard_override')
+        method: Enforcement method:
+            - 'biological': Enforce all biological constraints (recommended)
+            - 'average': Average predicted total with sum of components
+            - 'hard_override': Recalculate derived values from components
+            - 'trust_model': No adjustment
 
     Returns:
-        predictions: Updated predictions with constraint enforced
+        predictions: Updated predictions with constraints enforced
     """
     enforced = {}
 
     for image_id, pred_dict in predictions.items():
         pred = pred_dict.copy()
 
+        # Step 1: Clip all predictions to non-negative (biomass can't be negative!)
+        for key in pred:
+            pred[key] = max(0.0, pred[key])
+
         clover = pred['Dry_Clover_g']
         dead = pred['Dry_Dead_g']
         green = pred['Dry_Green_g']
+        gdm = pred['GDM_g']
         total = pred['Dry_Total_g']
 
-        component_sum = clover + dead + green
+        if method == 'biological':
+            # Enforce: GDM = Green + Clover
+            # Enforce: Total = GDM + Dead = Green + Clover + Dead
 
-        if method == 'average':
-            # Average the predicted total and sum of components
+            # Calculate what GDM should be based on components
+            gdm_from_components = green + clover
+
+            # Average predicted GDM with calculated GDM
+            adjusted_gdm = (gdm + gdm_from_components) / 2
+
+            # If components exist, scale them to match adjusted GDM
+            if gdm_from_components > 0:
+                gdm_scale = adjusted_gdm / gdm_from_components
+                pred['Dry_Green_g'] = green * gdm_scale
+                pred['Dry_Clover_g'] = clover * gdm_scale
+            pred['GDM_g'] = adjusted_gdm
+
+            # Now enforce Total = GDM + Dead
+            total_from_components = adjusted_gdm + dead
+
+            # Average predicted total with calculated total
+            adjusted_total = (total + total_from_components) / 2
+
+            # Scale dead matter to match (GDM is already fixed)
+            if adjusted_total > adjusted_gdm:
+                pred['Dry_Dead_g'] = adjusted_total - adjusted_gdm
+            else:
+                # Total can't be less than GDM, so set dead to 0
+                pred['Dry_Dead_g'] = 0.0
+                adjusted_total = adjusted_gdm
+
+            pred['Dry_Total_g'] = adjusted_total
+
+        elif method == 'average':
+            # Legacy: Average total with sum of components
+            component_sum = clover + dead + green
             new_total = (total + component_sum) / 2
 
-            # Distribute discrepancy proportionally
             if component_sum > 0:
                 scale = new_total / component_sum
                 pred['Dry_Clover_g'] = clover * scale
                 pred['Dry_Dead_g'] = dead * scale
                 pred['Dry_Green_g'] = green * scale
                 pred['Dry_Total_g'] = new_total
+                pred['GDM_g'] = pred['Dry_Green_g'] + pred['Dry_Clover_g']
             else:
-                # If all components are 0, set total to 0
                 pred['Dry_Total_g'] = 0.0
+                pred['GDM_g'] = 0.0
 
         elif method == 'hard_override':
-            # Recalculate Total as sum of components
-            pred['Dry_Total_g'] = component_sum
+            # Recalculate derived values from base components
+            pred['GDM_g'] = green + clover
+            pred['Dry_Total_g'] = green + clover + dead
 
         elif method == 'trust_model':
-            # No adjustment, trust the model's predictions
+            # No adjustment beyond clipping
             pass
 
         enforced[image_id] = pred
@@ -107,15 +153,14 @@ def apply_constraint_enforcement(predictions: Dict[str, Dict[str, float]],
 
 
 def apply_test_time_augmentation_with_flips(model, test_dataset, device='cuda',
-                                           denormalize_fn=None, batch_size=16):
+                                           denormalize_fn=None, batch_size=16,
+                                           include_rotations=True):
     """
-    Apply test-time augmentation using horizontal and vertical flips.
+    Apply test-time augmentation using flips and rotations.
 
-    Averages predictions over 4 versions:
-    - Original
-    - Horizontal flip
-    - Vertical flip
-    - Both flips
+    Averages predictions over multiple augmented versions:
+    - With rotations (default): 8 transforms (4 flip combos x 2 rotations)
+    - Without rotations: 4 transforms (4 flip combos only)
 
     Args:
         model: Trained PyTorch model
@@ -123,6 +168,7 @@ def apply_test_time_augmentation_with_flips(model, test_dataset, device='cuda',
         device: Device to run inference on
         denormalize_fn: Function to denormalize predictions
         batch_size: Batch size for inference
+        include_rotations: If True, include 90-degree rotations (8 transforms total)
 
     Returns:
         predictions: Dict mapping image_id to dict of averaged target predictions
@@ -134,9 +180,13 @@ def apply_test_time_augmentation_with_flips(model, test_dataset, device='cuda',
     all_predictions = {target: {} for target in TARGET_NAMES}
 
     # Get TTA transforms
-    tta_transforms = get_tta_transforms(image_size=test_dataset.image_size)
+    tta_transforms = get_tta_transforms(
+        image_size=test_dataset.image_size,
+        include_rotations=include_rotations
+    )
 
-    print(f"Using {len(tta_transforms)} TTA transforms (original + flips)")
+    tta_desc = "flips + rotations" if include_rotations else "flips only"
+    print(f"Using {len(tta_transforms)} TTA transforms ({tta_desc})")
 
     with torch.no_grad():
         for tta_idx, tta_transform in enumerate(tta_transforms):
@@ -293,9 +343,9 @@ def create_submission_csv(predictions: Dict[str, Dict[str, float]],
 
 def generate_submission(model, test_loader=None, test_dataset=None, device='cuda',
                        denormalize_fn=None,
-                       constraint_method: Optional[str] = 'average',
+                       constraint_method: Optional[str] = 'biological',
                        use_tta: bool = False,
-                       n_tta: int = 5,
+                       include_rotations: bool = True,
                        batch_size: int = 16,
                        output_path: Path = None,
                        test_csv_path: Path = None):
@@ -308,9 +358,14 @@ def generate_submission(model, test_loader=None, test_dataset=None, device='cuda
         test_dataset: Test Dataset (required if using TTA)
         device: Device to run inference on
         denormalize_fn: Function to denormalize predictions
-        constraint_method: Method for constraint enforcement ('average', 'trust_model', 'hard_override', None)
+        constraint_method: Method for constraint enforcement:
+            - 'biological': Enforce GDM=Green+Clover, Total=GDM+Dead (recommended)
+            - 'average': Average predicted total with sum of components
+            - 'hard_override': Recalculate derived values
+            - 'trust_model': No adjustment (only clips negatives)
+            - None: No post-processing at all
         use_tta: Whether to use test-time augmentation
-        n_tta: Number of TTA iterations (ignored, always uses 4 flips)
+        include_rotations: If True, TTA includes 90-degree rotations (8 transforms)
         batch_size: Batch size for TTA inference
         output_path: Path to save submission CSV
         test_csv_path: Path to test.csv
@@ -326,9 +381,10 @@ def generate_submission(model, test_loader=None, test_dataset=None, device='cuda
     if use_tta:
         if test_dataset is None:
             raise ValueError("test_dataset is required when use_tta=True")
-        print(f"\nUsing Test-Time Augmentation (TTA) with horizontal/vertical flips...")
+        tta_desc = "flips + rotations" if include_rotations else "flips only"
+        print(f"\nUsing Test-Time Augmentation (TTA) with {tta_desc}...")
         predictions = apply_test_time_augmentation_with_flips(
-            model, test_dataset, device, denormalize_fn, batch_size
+            model, test_dataset, device, denormalize_fn, batch_size, include_rotations
         )
     else:
         if test_loader is None:

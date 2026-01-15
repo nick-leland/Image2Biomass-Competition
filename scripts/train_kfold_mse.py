@@ -1,9 +1,16 @@
 """
 Train K-Fold Cross-Validation models with MSE loss, TensorBoard, and resume capability.
 
+Uses GroupKFold by default to prevent data leakage from images taken at the
+same location (State + Sampling_Date). This is critical because 4-22 similar
+images come from each farm/location.
+
 Usage:
-    # Start fresh training
+    # Start fresh training with GroupKFold (recommended, default)
     python scripts/train_kfold_mse.py --n_folds 5
+
+    # Use regular StratifiedKFold instead (NOT recommended - causes leakage!)
+    python scripts/train_kfold_mse.py --n_folds 5 --no_group_kfold
 
     # Resume from specific fold
     python scripts/train_kfold_mse.py --n_folds 5 --resume --start_fold 2
@@ -24,7 +31,7 @@ from pathlib import Path
 from src.config import TRAIN_CSV, TRAIN_IMG_DIR, TARGET_NAMES
 from src.utils.seed import set_seed, worker_init_fn
 from src.data.dataset import BiomassDataset, create_dataloaders
-from src.data.splitter import get_kfold_splits
+from src.data.splitter import get_kfold_splits, get_group_kfold_splits
 from src.data.transforms import get_train_transforms, get_val_transforms
 from src.models.model_factory import create_model
 from src.models.loss_functions import create_loss_function
@@ -47,10 +54,20 @@ def main():
                        help='Automatically resume all incomplete folds')
     parser.add_argument('--batch_size', type=int, default=None,
                        help='Override batch size (default: use config value)')
+    parser.add_argument('--group_kfold', action='store_true', default=True,
+                       help='Use GroupKFold to prevent location leakage (default: True)')
+    parser.add_argument('--no_group_kfold', action='store_true',
+                       help='Disable GroupKFold and use regular stratified KFold')
     args = parser.parse_args()
 
+    # Handle group_kfold flag
+    if args.no_group_kfold:
+        args.group_kfold = False
+
     print("=" * 70)
+    cv_type = "GroupKFold (location-based)" if args.group_kfold else "StratifiedKFold"
     print(f"Image2Biomass - {args.n_folds}-Fold CV with MSE Loss")
+    print(f"CV Strategy: {cv_type}")
     print("=" * 70)
 
     # Create MSE config based on best Huber config
@@ -124,12 +141,23 @@ def main():
     print(f"TensorBoard: tensorboard --logdir {base_checkpoint_dir}")
     print("=" * 70)
 
-    for fold_idx, (train_df, val_df) in get_kfold_splits(
-        df_wide,
-        n_folds=args.n_folds,
-        stratify_by=config['stratify_by'],
-        random_seed=config['seed']
-    ):
+    # Select appropriate split function
+    if args.group_kfold:
+        split_generator = get_group_kfold_splits(
+            df_wide,
+            n_folds=args.n_folds,
+            group_by='location',  # Groups by State + Sampling_Date
+            random_seed=config['seed']
+        )
+    else:
+        split_generator = get_kfold_splits(
+            df_wide,
+            n_folds=args.n_folds,
+            stratify_by=config['stratify_by'],
+            random_seed=config['seed']
+        )
+
+    for fold_idx, (train_df, val_df) in split_generator:
         # Check if we should skip this fold
         fold_checkpoint_dir = base_checkpoint_dir / f'fold_{fold_idx}'
 
@@ -346,6 +374,7 @@ def main():
         with open(results_path, 'w') as f:
             json.dump({
                 'n_folds': args.n_folds,
+                'cv_strategy': 'GroupKFold (location)' if args.group_kfold else 'StratifiedKFold',
                 'loss_function': 'mse',
                 'mean_val_loss': avg_val_loss,
                 'std_val_loss': std_val_loss,

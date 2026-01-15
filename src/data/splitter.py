@@ -1,11 +1,11 @@
 """
-Stratified split utilities for creating train/val splits.
+Stratified and group-based split utilities for creating train/val splits.
 """
 
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import StratifiedShuffleSplit
-from typing import Tuple
+from sklearn.model_selection import StratifiedShuffleSplit, GroupKFold
+from typing import Tuple, Generator
 
 from src.config import TARGET_NAMES
 
@@ -151,5 +151,75 @@ def get_kfold_splits(
         print(f"\nFold {fold_idx + 1}/{n_folds}:")
         print(f"  Train size: {len(train_df)}")
         print(f"  Val size: {len(val_df)}")
+
+        yield fold_idx, (train_df, val_df)
+
+
+def get_group_kfold_splits(
+    df: pd.DataFrame,
+    n_folds: int = 5,
+    group_by: str = 'location',
+    random_seed: int = 42
+) -> Generator[Tuple[int, Tuple[pd.DataFrame, pd.DataFrame]], None, None]:
+    """
+    Create GroupKFold splits to prevent data leakage from similar images.
+
+    IMPORTANT: Images from the same location (State + Sampling_Date) are kept
+    together in the same fold to prevent information leakage.
+
+    Args:
+        df: DataFrame in wide format (one row per image)
+        n_folds: Number of folds
+        group_by: Grouping strategy:
+            - 'location': Group by State + Sampling_Date (recommended)
+            - 'state': Group by State only
+            - 'date': Group by Sampling_Date only
+        random_seed: Random seed for shuffling before split
+
+    Yields:
+        fold_idx, (train_df, val_df) for each fold
+    """
+    # Create group labels based on strategy
+    if group_by == 'location':
+        # State + Date combination - images from same farm/day stay together
+        groups = df['State'].astype(str) + '_' + df['Sampling_Date'].astype(str)
+    elif group_by == 'state':
+        groups = df['State']
+    elif group_by == 'date':
+        groups = df['Sampling_Date']
+    else:
+        raise ValueError(f"Unknown group_by: {group_by}. Use 'location', 'state', or 'date'.")
+
+    # Shuffle the dataframe while keeping groups intact
+    # GroupKFold doesn't shuffle, so we need to shuffle groups first
+    np.random.seed(random_seed)
+    unique_groups = groups.unique()
+    np.random.shuffle(unique_groups)
+    group_order = {g: i for i, g in enumerate(unique_groups)}
+    df = df.copy()
+    df['_group_order'] = groups.map(group_order)
+    df = df.sort_values('_group_order').reset_index(drop=True)
+    groups = df['State'].astype(str) + '_' + df['Sampling_Date'].astype(str)
+    df = df.drop(columns=['_group_order'])
+
+    # Create GroupKFold splitter
+    gkf = GroupKFold(n_splits=n_folds)
+
+    print(f"\nGroupKFold splits by '{group_by}':")
+    print(f"  Total images: {len(df)}")
+    print(f"  Unique groups: {groups.nunique()}")
+
+    # Generate folds
+    for fold_idx, (train_idx, val_idx) in enumerate(gkf.split(df, groups=groups)):
+        train_df = df.iloc[train_idx].reset_index(drop=True)
+        val_df = df.iloc[val_idx].reset_index(drop=True)
+
+        # Get group info for this fold
+        train_groups = groups.iloc[train_idx].nunique()
+        val_groups = groups.iloc[val_idx].nunique()
+
+        print(f"\nFold {fold_idx + 1}/{n_folds}:")
+        print(f"  Train: {len(train_df)} images from {train_groups} groups")
+        print(f"  Val: {len(val_df)} images from {val_groups} groups")
 
         yield fold_idx, (train_df, val_df)

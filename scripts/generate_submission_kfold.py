@@ -190,26 +190,44 @@ def main():
             # Average them
             ensemble_predictions[target_name].append(np.mean(fold_preds))
 
-    # Apply constraint: Dry_Total = Dry_Clover + Dry_Dead + Dry_Green
-    print("\nApplying biological constraint (Dry_Total = sum of components)...")
+    # Apply biological constraints post-processing
+    print("\nApplying biological constraints post-processing...")
+    print("  - Clipping negative values to 0")
+    print("  - Enforcing GDM = Green + Clover")
+    print("  - Enforcing Total = GDM + Dead")
 
     for sample_idx in range(n_test_samples):
+        # Step 1: Clip all predictions to non-negative
+        for target_name in TARGET_NAMES:
+            ensemble_predictions[target_name][sample_idx] = max(
+                0.0, ensemble_predictions[target_name][sample_idx]
+            )
+
         clover = ensemble_predictions['Dry_Clover_g'][sample_idx]
         dead = ensemble_predictions['Dry_Dead_g'][sample_idx]
         green = ensemble_predictions['Dry_Green_g'][sample_idx]
+        gdm = ensemble_predictions['GDM_g'][sample_idx]
         total = ensemble_predictions['Dry_Total_g'][sample_idx]
 
-        component_sum = clover + dead + green
+        # Step 2: Enforce GDM = Green + Clover
+        gdm_from_components = green + clover
+        adjusted_gdm = (gdm + gdm_from_components) / 2
 
-        # Average the predicted total with the sum of components
-        # Then proportionally scale components to match
-        adjusted_total = (total + component_sum) / 2
+        if gdm_from_components > 0:
+            gdm_scale = adjusted_gdm / gdm_from_components
+            ensemble_predictions['Dry_Green_g'][sample_idx] = green * gdm_scale
+            ensemble_predictions['Dry_Clover_g'][sample_idx] = clover * gdm_scale
+        ensemble_predictions['GDM_g'][sample_idx] = adjusted_gdm
 
-        if component_sum > 0:
-            scale_factor = adjusted_total / component_sum
-            ensemble_predictions['Dry_Clover_g'][sample_idx] = clover * scale_factor
-            ensemble_predictions['Dry_Dead_g'][sample_idx] = dead * scale_factor
-            ensemble_predictions['Dry_Green_g'][sample_idx] = green * scale_factor
+        # Step 3: Enforce Total = GDM + Dead
+        total_from_components = adjusted_gdm + dead
+        adjusted_total = (total + total_from_components) / 2
+
+        if adjusted_total > adjusted_gdm:
+            ensemble_predictions['Dry_Dead_g'][sample_idx] = adjusted_total - adjusted_gdm
+        else:
+            ensemble_predictions['Dry_Dead_g'][sample_idx] = 0.0
+            adjusted_total = adjusted_gdm
 
         ensemble_predictions['Dry_Total_g'][sample_idx] = adjusted_total
 
@@ -258,19 +276,39 @@ def main():
               f"min: {min(values):>8.2f}  max: {max(values):>8.2f}")
 
     # Check constraint violations
-    print("\nConstraint check (Dry_Total vs sum of components):")
-    violations = []
+    print("\nConstraint check:")
+
+    # Check 1: GDM = Green + Clover
+    gdm_violations = []
+    for sample_idx in range(n_test_samples):
+        gdm = ensemble_predictions['GDM_g'][sample_idx]
+        gdm_calc = (ensemble_predictions['Dry_Green_g'][sample_idx] +
+                   ensemble_predictions['Dry_Clover_g'][sample_idx])
+        gdm_violations.append(abs(gdm - gdm_calc))
+
+    print(f"  GDM = Green + Clover:")
+    print(f"    Mean violation: {sum(gdm_violations)/len(gdm_violations):.6f}g")
+    print(f"    Max violation: {max(gdm_violations):.6f}g")
+
+    # Check 2: Total = GDM + Dead
+    total_violations = []
     for sample_idx in range(n_test_samples):
         total = ensemble_predictions['Dry_Total_g'][sample_idx]
-        component_sum = (ensemble_predictions['Dry_Clover_g'][sample_idx] +
-                        ensemble_predictions['Dry_Dead_g'][sample_idx] +
-                        ensemble_predictions['Dry_Green_g'][sample_idx])
-        violation = abs(total - component_sum)
-        violations.append(violation)
+        total_calc = (ensemble_predictions['GDM_g'][sample_idx] +
+                     ensemble_predictions['Dry_Dead_g'][sample_idx])
+        total_violations.append(abs(total - total_calc))
 
-    print(f"  Mean violation: {sum(violations)/len(violations):.6f}g")
-    print(f"  Max violation: {max(violations):.6f}g")
-    print(f"  All exact: {all(v < 1e-6 for v in violations)}")
+    print(f"  Total = GDM + Dead:")
+    print(f"    Mean violation: {sum(total_violations)/len(total_violations):.6f}g")
+    print(f"    Max violation: {max(total_violations):.6f}g")
+
+    # Check 3: No negative values
+    has_negatives = any(
+        ensemble_predictions[t][i] < 0
+        for t in TARGET_NAMES
+        for i in range(n_test_samples)
+    )
+    print(f"  Non-negative check: {'PASSED' if not has_negatives else 'FAILED'}")
 
     # Print individual fold predictions for comparison
     print("\n" + "=" * 70)

@@ -157,56 +157,55 @@ def get_val_transforms(image_size=512):
     ])
 
 
-def get_tta_transforms(image_size=512):
+def get_tta_transforms(image_size=512, include_rotations=True):
     """
     Get test-time augmentation (TTA) transforms.
 
-    Returns a list of transforms for TTA ensemble.
+    Returns a list of transforms for TTA ensemble. Top Kaggle solutions use
+    flips + rotations for best results.
 
     Args:
         image_size: Target image size
+        include_rotations: If True, includes 90/180/270 degree rotations (8 total transforms)
+                          If False, only uses flips (4 total transforms)
 
     Returns:
         List of Albumentations Compose objects
     """
-    # Original (no flip)
-    transform_original = A.Compose([
-        A.Resize(image_size, image_size),
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
+    transforms = []
 
-    # Horizontal flip
-    transform_hflip = A.Compose([
-        A.Resize(image_size, image_size),
-        A.HorizontalFlip(p=1.0),
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
-
-    # Vertical flip
-    transform_vflip = A.Compose([
-        A.Resize(image_size, image_size),
-        A.VerticalFlip(p=1.0),
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
-
-    # Both flips
-    transform_hvflip = A.Compose([
-        A.Resize(image_size, image_size),
-        A.HorizontalFlip(p=1.0),
-        A.VerticalFlip(p=1.0),
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
-
-    return [
-        transform_original,
-        transform_hflip,
-        transform_vflip,
-        transform_hvflip,
+    # Define flip combinations
+    flip_configs = [
+        (False, False),  # Original
+        (True, False),   # Horizontal flip
+        (False, True),   # Vertical flip
+        (True, True),    # Both flips
     ]
+
+    # Define rotation angles (0, 90, 180, 270 degrees)
+    # Note: 180 = hflip + vflip, so we only need 0 and 90 when combined with flips
+    rotation_angles = [0, 90] if include_rotations else [0]
+
+    for hflip, vflip in flip_configs:
+        for angle in rotation_angles:
+            transform_list = [A.Resize(image_size, image_size)]
+
+            if hflip:
+                transform_list.append(A.HorizontalFlip(p=1.0))
+            if vflip:
+                transform_list.append(A.VerticalFlip(p=1.0))
+            if angle > 0:
+                # Rotate by fixed angle
+                transform_list.append(A.Rotate(limit=(angle, angle), p=1.0, border_mode=0))
+
+            transform_list.extend([
+                A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+                ToTensorV2(),
+            ])
+
+            transforms.append(A.Compose(transform_list))
+
+    return transforms
 
 
 def visualize_augmentations(image, transform, n_samples=9):
