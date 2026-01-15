@@ -172,9 +172,17 @@ class BiomassDataset(Dataset):
                 - 'metadata': Dict of metadata values (if available)
         """
         image_id = self.image_ids[idx]
-        # Extract just the filename from image_path (CSV may contain 'train/ID.jpg' or just 'ID.jpg')
-        image_filename = Path(self.image_paths[image_id]).name
-        image_path = self.img_dir / image_filename
+        # Handle image path - support both relative paths and img_dir + filename
+        csv_image_path = Path(self.image_paths[image_id])
+
+        # Try paths in order: full csv path, img_dir + csv path, img_dir + filename
+        if csv_image_path.exists():
+            image_path = csv_image_path
+        elif (self.img_dir / csv_image_path).exists():
+            image_path = self.img_dir / csv_image_path
+        else:
+            # Fall back to img_dir + just filename
+            image_path = self.img_dir / csv_image_path.name
 
         # Load image
         image = Image.open(image_path).convert('RGB')
