@@ -92,12 +92,20 @@ class FoundationModelRegressor(nn.Module):
         self.target_names = TARGET_NAMES
 
         # Load backbone
-        self.backbone = timm.create_model(
-            backbone_name,
-            pretrained=True,
-            num_classes=0,
-            global_pool='avg'
-        )
+        # Note: DINOv2 models don't work with global_pool='avg', use default
+        if 'dinov2' in backbone_name:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+            )
+        else:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+                global_pool='avg'
+            )
 
         if freeze_backbone:
             for param in self.backbone.parameters():
@@ -135,12 +143,20 @@ class FoundationModelWithDepth(nn.Module):
         self.target_names = TARGET_NAMES
 
         # RGB backbone
-        self.backbone = timm.create_model(
-            backbone_name,
-            pretrained=True,
-            num_classes=0,
-            global_pool='avg'
-        )
+        # Note: DINOv2 models don't work with global_pool='avg', use default
+        if 'dinov2' in backbone_name:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+            )
+        else:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+                global_pool='avg'
+            )
 
         if freeze_backbone:
             for param in self.backbone.parameters():
@@ -199,6 +215,42 @@ class FoundationModelWithDepth(nn.Module):
         fused = torch.cat([rgb_features, depth_features], dim=1)
 
         return {name: self.heads[name](fused).squeeze(-1) for name in self.target_names}
+
+
+def get_parameter_groups(model, backbone_lr: float, head_lr: float, weight_decay: float):
+    """Create parameter groups with differential learning rates."""
+    backbone_params = []
+    head_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'backbone' in name:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+
+    return [
+        {'params': backbone_params, 'lr': backbone_lr, 'weight_decay': weight_decay},
+        {'params': head_params, 'lr': head_lr, 'weight_decay': weight_decay},
+    ]
+
+
+def get_warmup_cosine_scheduler(optimizer, warmup_epochs: int, total_epochs: int, min_lr: float = 1e-7):
+    """Create a scheduler with linear warmup followed by cosine annealing."""
+    from torch.optim.lr_scheduler import LambdaLR
+    import math
+
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            # Linear warmup
+            return (epoch + 1) / warmup_epochs
+        else:
+            # Cosine annealing
+            progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def train_fold(
@@ -329,18 +381,31 @@ def train_fold(
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Trainable parameters: {trainable_params:,} / {total_params:,}")
 
-    # Create optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config['learning_rate'],
+    # Create optimizer with differential learning rates
+    backbone_lr = config['learning_rate'] * config.get('backbone_lr_scale', 0.1)
+    head_lr = config['learning_rate']
+
+    print(f"  Backbone LR: {backbone_lr:.2e}")
+    print(f"  Head LR: {head_lr:.2e}")
+    print(f"  Warmup epochs: {config.get('warmup_epochs', 3)}")
+    print(f"  Gradient accumulation: {config.get('gradient_accumulation_steps', 4)}")
+
+    param_groups = get_parameter_groups(
+        model,
+        backbone_lr=backbone_lr,
+        head_lr=head_lr,
         weight_decay=config['weight_decay']
     )
 
-    # Create scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer = torch.optim.AdamW(param_groups)
+
+    # Create scheduler with warmup
+    warmup_epochs = config.get('warmup_epochs', 3)
+    scheduler = get_warmup_cosine_scheduler(
         optimizer,
-        T_max=config['num_epochs'],
-        eta_min=1e-6
+        warmup_epochs=warmup_epochs,
+        total_epochs=config['num_epochs'],
+        min_lr=1e-7
     )
 
     # Create criterion (MSE loss for each target)
@@ -363,7 +428,9 @@ def train_fold(
         device=device,
         checkpoint_dir=fold_checkpoint_dir,
         early_stopping_patience=config['early_stopping_patience'],
-        denormalize_fn=train_dataset.denormalize_targets
+        denormalize_fn=train_dataset.denormalize_targets,
+        gradient_accumulation_steps=config.get('gradient_accumulation_steps', 4),
+        max_grad_norm=config.get('max_grad_norm', 1.0),
     )
 
     # Train
@@ -393,7 +460,15 @@ def main():
     parser.add_argument('--batch_size', type=int, default=8,
                         help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
+                        help='Learning rate (for heads)')
+    parser.add_argument('--backbone_lr_scale', type=float, default=0.1,
+                        help='Backbone LR = lr * backbone_lr_scale (default: 0.1)')
+    parser.add_argument('--warmup_epochs', type=int, default=3,
+                        help='Number of warmup epochs')
+    parser.add_argument('--gradient_accumulation', type=int, default=4,
+                        help='Gradient accumulation steps (effective batch = batch_size * this)')
+    parser.add_argument('--max_grad_norm', type=float, default=1.0,
+                        help='Max gradient norm for clipping')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -414,10 +489,14 @@ def main():
         'num_epochs': args.epochs,
         'batch_size': args.batch_size,
         'learning_rate': args.lr,
+        'backbone_lr_scale': args.backbone_lr_scale,
+        'warmup_epochs': args.warmup_epochs,
+        'gradient_accumulation_steps': args.gradient_accumulation,
+        'max_grad_norm': args.max_grad_norm,
         'weight_decay': 0.01,
         'dropout': 0.3,
         'optimizer': 'adamw',
-        'scheduler': 'cosine',
+        'scheduler': 'warmup_cosine',
         'early_stopping_patience': 10,
         'num_workers': 4,
         'seed': args.seed,
@@ -445,7 +524,12 @@ def main():
     print(f"  Folds: {args.n_folds}")
     print(f"  Epochs: {args.epochs}")
     print(f"  Batch size: {args.batch_size}")
-    print(f"  Learning rate: {args.lr}")
+    print(f"  Head LR: {args.lr}")
+    print(f"  Backbone LR: {args.lr * args.backbone_lr_scale:.2e}")
+    print(f"  Warmup epochs: {args.warmup_epochs}")
+    print(f"  Gradient accumulation: {args.gradient_accumulation}")
+    print(f"  Effective batch size: {args.batch_size * args.gradient_accumulation}")
+    print(f"  Max grad norm: {args.max_grad_norm}")
 
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

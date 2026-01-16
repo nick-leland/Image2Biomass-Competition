@@ -43,7 +43,9 @@ class BiomassTrainer:
         device='cuda',
         checkpoint_dir='experiments/checkpoints',
         early_stopping_patience=10,
-        denormalize_fn=None
+        denormalize_fn=None,
+        gradient_accumulation_steps=1,
+        max_grad_norm=None
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -56,6 +58,8 @@ class BiomassTrainer:
         self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
         self.early_stopping_patience = early_stopping_patience
         self.denormalize_fn = denormalize_fn
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.max_grad_norm = max_grad_norm
 
         # Training state
         self.current_epoch = 0
@@ -73,7 +77,7 @@ class BiomassTrainer:
         self.trial = None
 
     def train_epoch(self):
-        """Train for one epoch."""
+        """Train for one epoch with gradient accumulation and clipping."""
         self.model.train()
         total_loss = 0.0
         all_predictions = {name: [] for name in ['Dry_Clover_g', 'Dry_Dead_g', 'Dry_Green_g', 'Dry_Total_g', 'GDM_g']}
@@ -81,28 +85,48 @@ class BiomassTrainer:
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch + 1} [Train]")
 
-        for batch in pbar:
+        self.optimizer.zero_grad()
+        accumulated_loss = 0.0
+
+        for batch_idx, batch in enumerate(pbar):
             images = batch['image'].to(self.device)
             targets = {k: v.to(self.device) for k, v in batch['targets'].items()}
 
             # Forward pass
-            self.optimizer.zero_grad()
             predictions = self.model(images)
             loss, loss_dict = self.criterion(predictions, targets)
 
-            # Backward pass
+            # Scale loss for gradient accumulation
+            loss = loss / self.gradient_accumulation_steps
             loss.backward()
-            self.optimizer.step()
 
-            total_loss += loss.item()
+            accumulated_loss += loss.item() * self.gradient_accumulation_steps
+            total_loss += loss.item() * self.gradient_accumulation_steps
 
             # Store predictions and targets for metrics
             for name in all_predictions.keys():
                 all_predictions[name].append(predictions[name].detach())
                 all_targets[name].append(targets[name].detach())
 
-            # Update progress bar
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+            # Optimizer step after accumulation
+            if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
+                # Gradient clipping
+                if self.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
+                # Update progress bar with accumulated loss
+                pbar.set_postfix({'loss': f"{accumulated_loss:.4f}"})
+                accumulated_loss = 0.0
+
+        # Handle remaining gradients if batches not divisible by accumulation steps
+        if len(self.train_loader) % self.gradient_accumulation_steps != 0:
+            if self.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
 
         avg_loss = total_loss / len(self.train_loader)
 
