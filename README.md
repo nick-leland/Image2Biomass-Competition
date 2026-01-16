@@ -2,129 +2,135 @@
 
 PyTorch-based solution for the [CSIRO Image2Biomass Kaggle competition](https://www.kaggle.com/competitions/csiro-biomass) - predicting biomass measurements from pasture images.
 
+## Leaderboard Progress
+
+| Version | Model | Kaggle R² | Key Changes |
+|---------|-------|-----------|-------------|
+| V1 | ResNet34 baseline | 0.30 | Initial submission |
+| V2 | EfficientNetV2-M | 0.42 | Better backbone |
+| V3 | 5-Fold Ensemble | 0.46 | K-fold cross-validation |
+| V4 | MSE Loss + Tuning | 0.50 | Loss aligned with metric |
+| **V5** | **RGB+Depth Fusion** | **0.57** | Depth Anything v2 + external data |
+| V6 | Ensemble (V4+V5) | Pending | Weighted ensemble |
+
+**Current Best: V5 with R² = 0.57**
+
 ## Competition Overview
 
 **Task**: Multi-target regression predicting 5 biomass measurements from pasture images:
 - `Dry_Clover_g` - Dry clover weight in grams
 - `Dry_Dead_g` - Dry dead matter weight in grams
 - `Dry_Green_g` - Dry green matter weight in grams
-- `Dry_Total_g` - Total dry matter weight in grams (constrained: = Clover + Dead + Green)
+- `Dry_Total_g` - Total dry matter weight in grams
 - `GDM_g` - Green dry matter weight in grams
 
-**Dataset**: 357 training images, 1 test image (public leaderboard)
+**Biological Constraints**:
+- GDM = Dry_Green + Dry_Clover
+- Total = GDM + Dry_Dead
 
-**Evaluation Metric**: Mean Absolute Error (MAE)
+**Dataset**: 357 training images + 261 external images (Danish GrassClover dataset)
 
-## Current Best Result
+**Evaluation Metric**: R² (coefficient of determination)
 
-**Model**: EfficientNetV2-M with Test-Time Augmentation (TTA)
-- **Validation Loss**: 0.3147 (Huber loss, delta=2.0)
-- **Improvement**: 78% better than baseline ResNet34 (1.4178 → 0.3147)
-- **Kaggle Score**: Pending submission results
+## Key Innovations
 
-## Approach
+### 1. RGB+Depth Fusion Architecture
 
-### Architecture Evolution
+Our best model uses a dual-encoder architecture that combines RGB features with depth information:
 
-We explored multiple architectures through systematic Optuna hyperparameter optimization:
-
-1. **Baseline (ResNet34)**: 1.4178 val loss
-2. **Optimized ResNet50**: 0.4387 val loss (69% improvement)
-3. **Vision Transformer Base (vit_base_patch16_384)**: 0.6640 val loss (too large for dataset)
-4. **EfficientNetV2-M (Final)**: 0.3147 val loss (78% improvement) ✅
-
-### Key Design Decisions
-
-**Multi-Task Learning**
-- Shared backbone with separate prediction heads for each target
-- Task-specific loss weighting (found via Optuna):
-  - Clover: 1.75, Dead: 0.75, Green: 1.0, Total: 1.0, GDM: 1.75
-- Huber loss (delta=2.0) for robustness to outliers
-
-**Constraint Enforcement**
-- Biological constraint: `Dry_Total = Dry_Clover + Dry_Dead + Dry_Green`
-- Method: Average predicted total with sum of components, then proportionally scale
-- Result: Perfect constraint satisfaction (0g violation)
-
-**Data Augmentation**
-- Best: Conservative augmentation (horizontal/vertical flips, minimal color jitter)
-- Finding: Aggressive augmentation hurt performance on small dataset (357 images)
-
-**Test-Time Augmentation (TTA)**
-- 4-way ensemble: Original + 3 flips (H, V, HV)
-- Averages predictions for more stable results
-
-### Hyperparameter Optimization
-
-**Optuna Study**: 92 trials over ~14 hours
-- Explored: 17 model architectures (ResNet, EfficientNet, ViT, ConvNeXt, Swin)
-- Tuned: Learning rate, optimizer, scheduler, augmentation, image size, batch size, loss weights
-- Best config found at trial 41 (EfficientNetV2-M)
-
-**Search Space**:
-```python
-Backbones: [resnet50, efficientnet_b4,
-            vit_tiny/small/base (224/384),
-            convnext_tiny/small/base,
-            efficientnetv2_s/m,
-            swin_tiny/small]
-Image sizes: [224, 384, 448, 512]
-Augmentation: [conservative, moderate, aggressive, extreme]
-Batch sizes: [8, 16, 32]
+```
+RGB Image ──> EfficientNetV2-M ──────┐
+                                     ├──> Concat ──> Regression Heads
+Depth Map ──> Lightweight CNN ───────┘
+     ↑
+     └── Depth Anything v2 (frozen)
 ```
 
-## What We Tried
+**Why depth helps**: Vegetation height correlates with biomass. Monocular depth estimation captures this 3D structure from 2D images.
 
-### Successful Approaches ✅
+### 2. External Data Integration
 
-1. **EfficientNetV2-M**: Best architecture for small dataset (54M params)
-2. **Conservative augmentation**: Less is more with 357 images
-3. **Large image size (512px)**: Higher resolution helped
-4. **Huber loss**: More robust than MSE
-5. **RMSprop optimizer**: Outperformed Adam/AdamW
-6. **Test-Time Augmentation**: Improved stability
-7. **Constraint enforcement**: Perfect satisfaction via averaging method
+Added 261 images from the Danish GrassClover dataset (AILab Denmark):
+- Mapped columns: `dry_grass` -> `Dry_Green_g`, `dry_clover` -> `Dry_Clover_g`, etc.
+- Despite domain shift (Denmark vs Australia), external data improved generalization (+0.07 R²)
 
-### Unsuccessful Approaches ❌
+### 3. GroupKFold Cross-Validation
 
-1. **Vision Transformers (ViT Base)**: Too large for dataset (86M params), overfitted
-   - Val loss: 0.6640 vs ResNet50's 0.4387
-2. **Aggressive augmentation**: Hurt performance
-   - Conservative outperformed aggressive by ~15%
-3. **Hard constraint learning**: Model learned relationships naturally
-   - constraint_mode='none' worked best
-4. **Larger image sizes (>512px)**: Diminishing returns + OOM issues
+Prevents data leakage by keeping images from the same location together:
+- Groups by: `State + Sampling_Date`
+- Ensures model generalizes to new locations, not just memorizes
 
-### Challenges Overcome
+### 4. Biological Constraints Post-Processing
 
-1. **GPU OOM errors**: Added memory cleanup between Optuna trials
-2. **PyTorch 2.6+ compatibility**: Added `weights_only=False` to `torch.load()`
-3. **Kaggle submission workflow**: Created internet-free inference notebook
-4. **Constraint violations**: Implemented proportional scaling method (0g violation)
+Enforces known relationships in predictions:
+```python
+# Enforce GDM = Green + Clover
+adjusted_gdm = (predicted_gdm + (green + clover)) / 2
+
+# Enforce Total = GDM + Dead
+adjusted_total = (predicted_total + (gdm + dead)) / 2
+```
+
+### 5. Test-Time Augmentation (TTA)
+
+8 transforms (4 flips x 2 rotations) averaged for more stable predictions.
+
+## Architecture Details
+
+### V5: RGB+Depth Fusion Model
+
+| Component | Details |
+|-----------|---------|
+| RGB Encoder | EfficientNetV2-RW-M (54M params) |
+| Depth Model | Depth Anything v2 Small (25M params, frozen) |
+| Depth Encoder | Lightweight CNN (4 conv layers -> 256 features) |
+| Fusion | Concatenation (1792 + 256 = 2048 features) |
+| Heads | 5 separate MLPs (256 -> 64 -> 1) |
+| Image Size | 384x384 |
+| Training | 30 epochs, AdamW, cosine LR schedule |
+
+### V4: Baseline Model
+
+| Component | Details |
+|-----------|---------|
+| Backbone | EfficientNetV2-M (tf_efficientnetv2_m) |
+| Heads | 5 separate MLPs (512 hidden dim) |
+| Image Size | 512x512 |
+| Loss | MSE |
+| Training | 50 epochs, 5-fold CV |
 
 ## Repository Structure
 
 ```
 Image2Biomass-Competition/
 ├── src/
-│   ├── data/              # Dataset, transforms, splitters
-│   ├── models/            # Model architectures, loss functions
-│   ├── training/          # Trainer, optimizers, schedulers
-│   ├── optuna_optimization/ # Hyperparameter search
-│   ├── evaluation/        # Metrics
-│   └── utils/             # Submission, seeding, helpers
+│   ├── data/
+│   │   ├── dataset.py          # BiomassDataset with multi-path support
+│   │   ├── transforms.py       # Augmentations + TTA transforms
+│   │   └── splitter.py         # GroupKFold + stratified splits
+│   ├── models/
+│   │   ├── depth_encoder.py    # DepthEstimator, RGBDepthFusionEncoder
+│   │   ├── model_factory.py    # Model creation with config
+│   │   └── multi_task_model.py # Base multi-task architecture
+│   ├── training/
+│   │   └── trainer.py          # Training loop with early stopping
+│   └── utils/
+│       └── submission.py       # Constraint enforcement, submission generation
 ├── scripts/
-│   ├── train_baseline.py            # Train ResNet baseline
-│   ├── train_optimized.py           # Train with best config
-│   ├── optimize_hyperparams.py      # Optuna optimization
-│   ├── generate_submission_optimized.py # Generate submission with TTA
-│   └── run_optuna_with_dashboard.sh # Launch optimization with live dashboard
-├── notebooks/
-│   ├── eda_initial.ipynb            # Exploratory data analysis
-│   ├── image2biomass-efficientnetv2.ipynb  # Kaggle inference notebook
-│   └── kaggle_inference_notebook.ipynb     # Alternative inference
+│   ├── train_depth_model.py           # Train RGB+Depth fusion
+│   ├── train_kfold_mse.py             # Train baseline with K-fold
+│   ├── prepare_external_data.py       # Process GrassClover dataset
+│   ├── generate_submission_depth.py   # Generate depth model submission
+│   ├── generate_submission_kfold.py   # Generate baseline submission
+│   └── package_depth_model_kaggle.py  # Package models for Kaggle
+├── kaggle_upload/
+│   ├── ensemble_v4_v5.tar.gz          # V6 ensemble models (5.3 GB)
+│   ├── depth_fusion_model.tar.gz      # V5 depth fusion (3.4 GB)
+│   └── depth_fusion_model_componly.tar.gz  # V5 without external data
+├── kaggle_inference_notebook_v6_ensemble.ipynb    # V6 submission notebook
+├── kaggle_inference_notebook_v5_depth_fusion.ipynb # V5 submission notebook
 ├── CLAUDE.md              # Instructions for Claude Code
-├── IMPROVEMENTS.md        # Latest improvements summary
+├── COMPETITION_INSIGHTS.md # Research findings from Kaggle forums
 └── README.md              # This file
 ```
 
@@ -137,77 +143,87 @@ cd Image2Biomass-Competition
 
 # Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install dependencies (using uv for speed)
-uv pip install torch torchvision timm albumentations pandas scikit-learn optuna optuna-dashboard
-```
-
-## Usage
-
-### Training the Best Model
-
-```bash
-# Train EfficientNetV2-M with optimized hyperparameters
 source .venv/bin/activate
-python scripts/train_optimized.py \
-    --config experiments/optuna_studies/advanced_models_20260111_013829/best_config.json \
-    --checkpoint_dir experiments/checkpoints_final
+
+# Install dependencies (using uv)
+uv pip install torch torchvision timm albumentations pandas scikit-learn
+uv pip install transformers  # For Depth Anything v2
 ```
 
-### Generating Submissions
+## Training
+
+### Train Depth Fusion Model (V5)
 
 ```bash
-# Generate submission with TTA (4-flip ensemble)
-python scripts/generate_submission_optimized.py
+# With external data (best results)
+python scripts/train_depth_model.py --use_external --epochs 30 --n_folds 5
+
+# Competition data only
+python scripts/train_depth_model.py --epochs 30 --n_folds 5
 ```
 
-### Running Hyperparameter Optimization
+### Train Baseline Model (V4)
 
 ```bash
-# Start Optuna optimization with live dashboard
-bash scripts/run_optuna_with_dashboard.sh 100 8080
-# Opens dashboard at http://localhost:8080
+python scripts/train_kfold_mse.py --n_folds 5 --epochs 50
 ```
 
-## Results Timeline
+## Generating Submissions
 
-| Model | Val Loss | Improvement | Notes |
-|-------|----------|-------------|-------|
-| ResNet34 baseline | 1.4178 | - | Initial baseline |
-| ResNet50 (Optuna) | 0.4387 | 69% | First optimization pass |
-| ViT Base 384 | 0.6640 | -51% | Too large, overfitted |
-| **EfficientNetV2-M + TTA** | **0.3147** | **78%** | **Current best** |
+```bash
+# V5: Depth fusion
+python scripts/generate_submission_depth.py --checkpoint_dir experiments/checkpoints_depth_*
 
-## Key Findings
+# V4: Baseline
+python scripts/generate_submission_kfold.py --checkpoint_dir experiments/checkpoints_kfold_mse
+```
 
-1. **Model size matters with small datasets**: EfficientNetV2-M (54M) > ViT Base (86M)
-2. **Augmentation less is more**: Conservative > Aggressive with 357 images
-3. **Resolution helps**: 512px > 384px > 224px
-4. **Constraint learning**: Model learns naturally, no hard constraints needed
-5. **TTA improves stability**: 4-flip ensemble reduces variance
+## Kaggle Submission
 
-## Future Work
+1. Upload model package to Kaggle Datasets
+2. Create notebook from `kaggle_inference_notebook_v6_ensemble.ipynb`
+3. Add model dataset + competition data
+4. **Set Internet to OFF**
+5. Submit
 
-- [ ] Ensemble multiple architectures (EfficientNetV2-M + ConvNeXt)
-- [ ] Semi-supervised learning with unlabeled images
-- [ ] Incorporate metadata (NDVI, height, state, species) as auxiliary inputs
-- [ ] Cross-validation instead of single train/val split
-- [ ] Fine-tune on full dataset (no validation split) for final submission
-- [ ] Try EfficientNetV2-L or ConvNeXt-Base
+## What Worked
 
-## Competition Links
+| Technique | Impact | Notes |
+|-----------|--------|-------|
+| Depth fusion | +0.07 R² | Biggest single improvement |
+| External data | +0.03 R² | Danish GrassClover dataset |
+| GroupKFold CV | Better generalization | Prevents location leakage |
+| MSE loss | +0.04 R² | Better aligned with R² metric |
+| 5-fold ensemble | +0.04 R² | Reduces variance |
+| Biological constraints | Cleaner predictions | Post-processing enforcement |
+| TTA (8 transforms) | +0.01-0.02 R² | More stable predictions |
 
-- **Competition**: https://www.kaggle.com/competitions/csiro-biomass
-- **Leaderboard**: TBD (awaiting submission results)
+## What Didn't Work
+
+| Technique | Result | Notes |
+|-----------|--------|-------|
+| Vision Transformers | Worse | Too large for 357 images, overfitted |
+| Aggressive augmentation | Worse | Conservative augmentation better |
+| Hard constraint learning | No improvement | Post-processing works better |
+| Training on competition data only (depth model) | Worse CV but timed out on Kaggle | External data crucial |
+
+## Future Ideas
+
+- [ ] Try DINOv2 or SigLIP backbones
+- [ ] Attention fusion instead of concatenation
+- [ ] More external data sources
+- [ ] Pseudo-labeling on test set
+- [ ] Stacking ensemble with meta-learner
 
 ## Acknowledgments
 
 Built with Claude Code (claude.ai/code) using:
 - PyTorch 2.6+
 - timm (PyTorch Image Models)
-- Albumentations for augmentation
-- Optuna for hyperparameter optimization
+- Transformers (Depth Anything v2)
+- Albumentations
+
+External data from [AILab Denmark GrassClover dataset](https://huggingface.co/datasets/AILabDenmark/GrassClover).
 
 ## License
 
