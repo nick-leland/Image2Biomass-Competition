@@ -437,9 +437,13 @@ def train_fold(
     print(f"\nTraining Fold {fold_idx + 1}...")
     best_val_loss = trainer.train(num_epochs=config['num_epochs'])
 
+    # Get weighted R² from best epoch (last in history after loading best model)
+    best_weighted_r2 = trainer.history['val_metrics'][-1].get('weighted_R2', 0.0)
+
     return {
         'fold': fold_idx,
         'best_val_loss': best_val_loss,
+        'best_weighted_r2': best_weighted_r2,
         'checkpoint_dir': str(fold_checkpoint_dir),
     }
 
@@ -576,16 +580,21 @@ def main():
 
     # Summary
     val_losses = [r['best_val_loss'] for r in fold_results]
+    weighted_r2s = [r.get('best_weighted_r2', 0.0) for r in fold_results]
     mean_loss = np.mean(val_losses)
     std_loss = np.std(val_losses)
+    mean_r2 = np.mean(weighted_r2s)
+    std_r2 = np.std(weighted_r2s)
 
     print("\n" + "=" * 70)
     print("TRAINING COMPLETE")
     print("=" * 70)
     print(f"\nResults by fold:")
     for r in fold_results:
-        print(f"  Fold {r['fold'] + 1}: Val Loss = {r['best_val_loss']:.4f}")
+        r2 = r.get('best_weighted_r2', 0.0)
+        print(f"  Fold {r['fold'] + 1}: Val Loss = {r['best_val_loss']:.4f}, Weighted R2 = {r2:.4f}")
     print(f"\nMean Val Loss: {mean_loss:.4f} +/- {std_loss:.4f}")
+    print(f"Mean Weighted R2 (Kaggle): {mean_r2:.4f} +/- {std_r2:.4f}")
     print(f"\nCheckpoints: {checkpoint_dir}")
 
     # Save results
@@ -595,6 +604,8 @@ def main():
         'use_depth': args.use_depth,
         'mean_val_loss': mean_loss,
         'std_val_loss': std_loss,
+        'mean_weighted_r2': mean_r2,
+        'std_weighted_r2': std_r2,
         'fold_results': fold_results,
         'config': config,
     }

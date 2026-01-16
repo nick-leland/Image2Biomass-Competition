@@ -221,6 +221,7 @@ class BiomassTrainer:
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
             print(f"  Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
             print(f"  Train MAE: {train_metrics['overall_MAE']:.4f} | Val MAE: {val_metrics['overall_MAE']:.4f}")
+            print(f"  Train R2: {train_metrics['weighted_R2']:.4f} | Val R2: {val_metrics['weighted_R2']:.4f} (Kaggle weighted)")
             print(f"  Learning Rate: {current_lr:.6f}")
 
             # Checkpointing

@@ -7,6 +7,15 @@ import torch
 from typing import Dict
 from src.config import TARGET_NAMES
 
+# Competition weights for weighted R² score
+KAGGLE_WEIGHTS = {
+    'Dry_Total_g': 0.50,
+    'GDM_g': 0.20,
+    'Dry_Green_g': 0.10,
+    'Dry_Dead_g': 0.10,
+    'Dry_Clover_g': 0.10,
+}
+
 
 def compute_metrics(predictions: Dict[str, torch.Tensor],
                    targets: Dict[str, torch.Tensor],
@@ -63,6 +72,27 @@ def compute_metrics(predictions: Dict[str, torch.Tensor],
     metrics['overall_R2'] = np.mean([metrics[f'{t}_R2'] for t in TARGET_NAMES])
     metrics['overall_MAPE'] = np.mean([metrics[f'{t}_MAPE'] for t in TARGET_NAMES])
 
+    # Kaggle weighted R² (competition metric)
+    # Uses log-stabilizing transformation: log(1 + x)
+    weighted_r2 = 0.0
+    for target_name in TARGET_NAMES:
+        pred = pred_dict[target_name]
+        true = true_dict[target_name]
+
+        # Log-stabilizing transformation
+        pred_log = np.log1p(np.maximum(pred, 0))
+        true_log = np.log1p(np.maximum(true, 0))
+
+        # R² on log-transformed values
+        ss_res = np.sum((true_log - pred_log) ** 2)
+        ss_tot = np.sum((true_log - np.mean(true_log)) ** 2)
+        r2_log = float(1 - (ss_res / ss_tot)) if ss_tot > 1e-8 else 0.0
+
+        weighted_r2 += KAGGLE_WEIGHTS[target_name] * r2_log
+        metrics[f'{target_name}_R2_log'] = r2_log
+
+    metrics['weighted_R2'] = weighted_r2
+
     # Constraint violation metrics
     pred_total = pred_dict['Dry_Total_g']
     pred_sum = (pred_dict['Dry_Clover_g'] +
@@ -94,6 +124,7 @@ def print_metrics(metrics: Dict[str, float], prefix: str = ""):
     print(f"{'Overall MAE:':<30} {metrics['overall_MAE']:>8.4f}")
     print(f"{'Overall RMSE:':<30} {metrics['overall_RMSE']:>8.4f}")
     print(f"{'Overall R2:':<30} {metrics['overall_R2']:>8.4f}")
+    print(f"{'Weighted R2 (Kaggle):':<30} {metrics['weighted_R2']:>8.4f}")
     print(f"{'Overall MAPE:':<30} {metrics['overall_MAPE']:>8.2f}%")
 
     print("\nPer-Target Metrics:")
@@ -119,7 +150,12 @@ def compute_kaggle_score(predictions: Dict[str, torch.Tensor],
                         targets: Dict[str, torch.Tensor],
                         denormalize_fn=None) -> float:
     """
-    Compute Kaggle competition score (assuming MAE is the metric).
+    Compute Kaggle competition score (weighted R² with log transform).
+
+    Competition uses weighted R² with weights:
+    - Dry_Total_g: 0.50
+    - GDM_g: 0.20
+    - Dry_Green_g, Dry_Dead_g, Dry_Clover_g: 0.10 each
 
     Args:
         predictions: Dict of prediction tensors
@@ -127,7 +163,7 @@ def compute_kaggle_score(predictions: Dict[str, torch.Tensor],
         denormalize_fn: Optional function to denormalize values
 
     Returns:
-        score: Overall MAE (lower is better)
+        score: Weighted R² (higher is better)
     """
     metrics = compute_metrics(predictions, targets, denormalize_fn)
-    return metrics['overall_MAE']
+    return metrics['weighted_R2']
