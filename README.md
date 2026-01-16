@@ -4,16 +4,16 @@ PyTorch-based solution for the [CSIRO Image2Biomass Kaggle competition](https://
 
 ## Leaderboard Progress
 
-| Version | Model | Kaggle R² | Val Loss | Key Changes |
-|---------|-------|-----------|----------|-------------|
-| V1 | ResNet34 baseline | 0.30 | - | Initial submission |
-| V2 | EfficientNetV2-M | 0.42 | - | Better backbone |
-| V3 | 5-Fold Ensemble | 0.46 | - | K-fold cross-validation |
-| V4 | MSE Loss + Tuning | 0.50 | 2.00 | Loss aligned with metric |
-| V5 | RGB+Depth Fusion | 0.57 | 1.93 | Depth Anything v2 + external data |
-| V6 | Ensemble (V4+V5) | 0.57 | - | Weighted ensemble (no improvement) |
-| **V7** | **DINOv2 ViT-Base** | **0.58** | 2.18 | Foundation model backbone |
-| V8 | DINOv2 + Depth | Pending | 2.08 | Foundation model + depth fusion |
+| Version | Model | CV R² | LB R² | Key Changes |
+|---------|-------|-------|-------|-------------|
+| V1 | ResNet34 baseline | - | 0.30 | Initial submission |
+| V2 | EfficientNetV2-M | - | 0.42 | Better backbone |
+| V3 | 5-Fold Ensemble | - | 0.46 | K-fold cross-validation |
+| V4 | MSE Loss + Tuning | 0.74 | 0.50 | Overfitting detected |
+| V5 | RGB+Depth Fusion | 0.48 | 0.57 | Depth Anything v2 + external data |
+| V6 | Ensemble (V4+V5) | - | 0.57 | Weighted ensemble (no improvement) |
+| **V7** | **DINOv2 ViT-Base** | **0.50** | **0.58** | Foundation model backbone |
+| V8 | DINOv2 + Depth | 0.50 | Pending | Foundation model + depth fusion |
 
 **Current Best: V7 with R² = 0.58**
 
@@ -32,7 +32,10 @@ PyTorch-based solution for the [CSIRO Image2Biomass Kaggle competition](https://
 
 **Dataset**: 357 training images + 261 external images (Danish GrassClover dataset)
 
-**Evaluation Metric**: R² (coefficient of determination)
+**Evaluation Metric**: Weighted R² with log-stabilizing transform:
+- `Dry_Total_g`: 50% weight
+- `GDM_g`: 20% weight
+- `Dry_Green_g`, `Dry_Dead_g`, `Dry_Clover_g`: 10% each
 
 ## Key Innovations
 
@@ -233,6 +236,32 @@ python scripts/generate_submission_kfold.py --checkpoint_dir experiments/checkpo
 | Aggressive augmentation | Worse | Conservative augmentation better |
 | Hard constraint learning | No improvement | Post-processing works better |
 | Training on competition data only (depth model) | Worse CV but timed out on Kaggle | External data crucial |
+
+## CV vs Leaderboard Correlation
+
+We discovered that **CV score does not directly predict LB score** - the gap between them reveals generalization:
+
+| Model | CV R² | CV Std | LB R² | Gap | Interpretation |
+|-------|-------|--------|-------|-----|----------------|
+| V4 (EfficientNetV2) | 0.74 | 0.04 | 0.50 | -0.24 | Severe overfitting |
+| V5 (Depth + external) | 0.48 | 0.30 | 0.57 | +0.09 | Good generalization |
+| V7 (DINOv2) | 0.50 | 0.09 | 0.58 | +0.08 | Good generalization |
+| V8 (DINOv2 + Depth) | 0.50 | 0.07 | Pending | ? | Lowest variance |
+
+### Key Insights
+
+1. **High CV can mean overfitting**: V4 had the highest CV (0.74) but lowest LB (0.50). The model memorized training data.
+
+2. **Foundation models generalize better**: DINOv2's pre-trained representations transfer well to unseen data, even with lower CV scores.
+
+3. **Lower variance = better generalization**: Models with consistent performance across folds (low std) tend to perform better on the test set.
+
+4. **The competition metric matters**: We were tracking MSE loss, but the actual metric is weighted R² with log transform. Different targets have different weights:
+   - `Dry_Total_g`: 50%
+   - `GDM_g`: 20%
+   - `Dry_Green_g`, `Dry_Dead_g`, `Dry_Clover_g`: 10% each
+
+5. **Fold 2 is problematic**: Across all models, Fold 2 shows poor performance due to +113% distribution shift in `Dry_Clover_g` between train and validation.
 
 ## Future Ideas
 
