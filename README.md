@@ -239,6 +239,8 @@ python scripts/generate_submission_kfold.py --checkpoint_dir experiments/checkpo
 | Hard constraint learning | No improvement | Post-processing works better |
 | Training on competition data only (depth model) | Worse CV but timed out on Kaggle | External data crucial |
 | Stratified splitting | No improvement | Standard GroupKFold worked just as well |
+| Attention fusion (V10) | CV 0.44 (worse) | Simple concatenation beats cross-modal attention |
+| Pseudo-labeling (V11) | CV 0.51, std 0.15 | Higher variance, no improvement over V8 |
 
 ## CV vs Leaderboard Correlation
 
@@ -270,9 +272,9 @@ We discovered that **CV score does not directly predict LB score** - the gap bet
 
 - [x] Try DINOv2 or SigLIP backbones (DINOv2 worked best - V7: 0.58)
 - [x] DINOv2 + Depth fusion (V8: 0.62 - new best!)
-- [ ] Attention fusion instead of concatenation
+- [x] Attention fusion instead of concatenation (V10: did not improve)
+- [x] Pseudo-labeling on unlabeled external data (V11: did not improve)
 - [ ] More external data sources
-- [ ] Pseudo-labeling on test set
 - [ ] Stacking ensemble with meta-learner
 
 ## Acknowledgments
