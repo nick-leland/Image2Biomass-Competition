@@ -47,6 +47,11 @@ BACKBONE_CONFIGS = {
         'image_size': 518,  # Native size for DINOv2
         'features': 768,
     },
+    'dinov2_large': {
+        'model_name': 'vit_large_patch14_dinov2',
+        'image_size': 518,
+        'features': 1024,
+    },
     'dinov2_base_reg': {
         'model_name': 'vit_base_patch14_reg4_dinov2',
         'image_size': 518,
@@ -217,6 +222,262 @@ class FoundationModelWithDepth(nn.Module):
         return {name: self.heads[name](fused).squeeze(-1) for name in self.target_names}
 
 
+class FoundationModelWithDepthAttention(nn.Module):
+    """Foundation model + depth with attention-based fusion.
+
+    Key innovation: Target-specific attention allows each biomass target
+    to learn its own weighting of RGB vs depth features. For example:
+    - Dry_Dead_g might rely more on RGB color (brown/yellow)
+    - Dry_Total_g might rely more on depth (vegetation height)
+    """
+
+    def __init__(
+        self,
+        backbone_name: str = 'vit_base_patch14_dinov2',
+        num_features: int = 768,
+        dropout: float = 0.3,
+        freeze_backbone: bool = False,
+        fusion_dim: int = 512,
+        num_attention_heads: int = 8,
+    ):
+        super().__init__()
+
+        self.target_names = TARGET_NAMES
+        self.fusion_dim = fusion_dim
+
+        # RGB backbone
+        if 'dinov2' in backbone_name:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+            )
+        else:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+                global_pool='avg'
+            )
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+        # Depth estimator
+        from src.models.depth_encoder import DepthEstimator
+        self.depth_estimator = DepthEstimator(
+            model_type='depth_anything_v2_small',
+            freeze=True
+        )
+
+        # Depth encoder (same as before)
+        self.depth_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(128, 256),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+
+        # Project both modalities to same dimension for attention
+        self.rgb_proj = nn.Sequential(
+            nn.Linear(num_features, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.GELU(),
+        )
+        self.depth_proj = nn.Sequential(
+            nn.Linear(256, fusion_dim),
+            nn.LayerNorm(fusion_dim),
+            nn.GELU(),
+        )
+
+        # Cross-modal attention: learns interactions between RGB and depth
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=fusion_dim,
+            num_heads=num_attention_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.attention_norm = nn.LayerNorm(fusion_dim)
+
+        # Gating mechanism: learns per-sample weighting of RGB vs depth
+        self.gate = nn.Sequential(
+            nn.Linear(fusion_dim * 2, fusion_dim),
+            nn.GELU(),
+            nn.Linear(fusion_dim, 2),
+            nn.Softmax(dim=-1)
+        )
+
+        # Target-specific regression heads with their own feature refinement
+        self.heads = nn.ModuleDict()
+        for name in self.target_names:
+            self.heads[name] = nn.Sequential(
+                nn.Linear(fusion_dim, 256),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(256, 64),
+                nn.GELU(),
+                nn.Linear(64, 1)
+            )
+
+    def forward(self, x):
+        # Extract RGB features from backbone
+        rgb_features = self.backbone(x)  # (B, 768)
+
+        # Extract depth features
+        with torch.no_grad():
+            depth_maps = self.depth_estimator(x)
+        depth_features = self.depth_encoder(depth_maps)  # (B, 256)
+
+        # Project to common dimension
+        rgb_proj = self.rgb_proj(rgb_features)  # (B, fusion_dim)
+        depth_proj = self.depth_proj(depth_features)  # (B, fusion_dim)
+
+        # Stack as sequence for attention: (B, 2, fusion_dim)
+        # Position 0 = RGB, Position 1 = Depth
+        combined = torch.stack([rgb_proj, depth_proj], dim=1)
+
+        # Cross-modal attention with residual
+        attended, _ = self.cross_attention(combined, combined, combined)
+        attended = self.attention_norm(attended + combined)  # (B, 2, fusion_dim)
+
+        # Extract attended features
+        rgb_attended = attended[:, 0, :]  # (B, fusion_dim)
+        depth_attended = attended[:, 1, :]  # (B, fusion_dim)
+
+        # Compute adaptive gate weights
+        gate_input = torch.cat([rgb_attended, depth_attended], dim=1)  # (B, fusion_dim*2)
+        gate_weights = self.gate(gate_input)  # (B, 2)
+
+        # Gated fusion
+        fused = gate_weights[:, 0:1] * rgb_attended + gate_weights[:, 1:2] * depth_attended
+
+        # Predict each target
+        return {name: self.heads[name](fused).squeeze(-1) for name in self.target_names}
+
+
+class FoundationModelWithDepthAndVegIndices(nn.Module):
+    """Foundation model + depth + vegetation indices fusion."""
+
+    def __init__(
+        self,
+        backbone_name: str = 'vit_base_patch14_dinov2',
+        num_features: int = 768,
+        dropout: float = 0.3,
+        freeze_backbone: bool = False,
+    ):
+        super().__init__()
+
+        self.target_names = TARGET_NAMES
+
+        # RGB backbone
+        if 'dinov2' in backbone_name:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+            )
+        else:
+            self.backbone = timm.create_model(
+                backbone_name,
+                pretrained=True,
+                num_classes=0,
+                global_pool='avg'
+            )
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+        # Depth estimator
+        from src.models.depth_encoder import DepthEstimator
+        self.depth_estimator = DepthEstimator(
+            model_type='depth_anything_v2_small',
+            freeze=True
+        )
+
+        # Depth encoder
+        self.depth_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(128, 256),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+
+        # Vegetation indices encoder (6 channels -> 64 features)
+        from src.data.vegetation_indices import N_VEGETATION_INDICES
+        self.veg_encoder = nn.Sequential(
+            nn.Conv2d(N_VEGETATION_INDICES, 32, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(32),
+            nn.GELU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, 64),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+
+        # RGB (768) + Depth (256) + VegIndices (64) = 1088
+        fused_features = num_features + 256 + 64
+
+        # Regression heads
+        self.heads = nn.ModuleDict()
+        for name in self.target_names:
+            self.heads[name] = nn.Sequential(
+                nn.Linear(fused_features, 256),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(256, 64),
+                nn.GELU(),
+                nn.Linear(64, 1)
+            )
+
+    def forward(self, x):
+        # RGB features from backbone
+        rgb_features = self.backbone(x)
+
+        # Depth features
+        with torch.no_grad():
+            depth_maps = self.depth_estimator(x)
+        depth_features = self.depth_encoder(depth_maps)
+
+        # Vegetation indices features
+        from src.data.vegetation_indices import compute_vegetation_indices_torch
+        veg_indices = compute_vegetation_indices_torch(x)  # (B, 6, H, W)
+        veg_features = self.veg_encoder(veg_indices)
+
+        # Fuse all features
+        fused = torch.cat([rgb_features, depth_features, veg_features], dim=1)
+
+        return {name: self.heads[name](fused).squeeze(-1) for name in self.target_names}
+
+
 def get_parameter_groups(model, backbone_lr: float, head_lr: float, weight_decay: float):
     """Create parameter groups with differential learning rates."""
     backbone_params = []
@@ -359,8 +620,24 @@ def train_fold(
     print(f"  Backbone: {backbone_config['model_name']}")
     print(f"  Image size: {image_size}")
     print(f"  Use depth: {config['use_depth']}")
+    print(f"  Use attention: {config.get('use_attention', False)}")
+    print(f"  Use veg indices: {config.get('use_veg_indices', False)}")
 
-    if config['use_depth']:
+    if config['use_depth'] and config.get('use_veg_indices', False):
+        model = FoundationModelWithDepthAndVegIndices(
+            backbone_name=backbone_config['model_name'],
+            num_features=backbone_config['features'],
+            dropout=config['dropout'],
+            freeze_backbone=config['freeze_backbone'],
+        )
+    elif config['use_depth'] and config.get('use_attention', False):
+        model = FoundationModelWithDepthAttention(
+            backbone_name=backbone_config['model_name'],
+            num_features=backbone_config['features'],
+            dropout=config['dropout'],
+            freeze_backbone=config['freeze_backbone'],
+        )
+    elif config['use_depth']:
         model = FoundationModelWithDepth(
             backbone_name=backbone_config['model_name'],
             num_features=backbone_config['features'],
@@ -473,6 +750,14 @@ def main():
                         help='Gradient accumulation steps (effective batch = batch_size * this)')
     parser.add_argument('--max_grad_norm', type=float, default=1.0,
                         help='Max gradient norm for clipping')
+    parser.add_argument('--stratified', action='store_true',
+                        help='Use stratified group k-fold splits')
+    parser.add_argument('--use_external', action='store_true',
+                        help='Include external GrassClover data')
+    parser.add_argument('--use_veg_indices', action='store_true',
+                        help='Add vegetation indices as features')
+    parser.add_argument('--use_attention', action='store_true',
+                        help='Use attention-based fusion instead of concatenation')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
@@ -487,8 +772,13 @@ def main():
         'backbone': args.backbone,
         'backbone_model': backbone_config['model_name'],
         'image_size': backbone_config['image_size'],
+        'features': backbone_config['features'],
         'use_depth': args.use_depth,
+        'use_veg_indices': args.use_veg_indices,
+        'use_attention': args.use_attention,
         'freeze_backbone': args.freeze_backbone,
+        'stratified': args.stratified,
+        'use_external': args.use_external,
         'n_folds': args.n_folds,
         'num_epochs': args.epochs,
         'batch_size': args.batch_size,
@@ -509,7 +799,18 @@ def main():
 
     # Create checkpoint directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    model_name = f"{args.backbone}{'_depth' if args.use_depth else ''}"
+    suffix_parts = [args.backbone]
+    if args.use_depth:
+        suffix_parts.append('depth')
+    if args.use_attention:
+        suffix_parts.append('attn')
+    if args.use_veg_indices:
+        suffix_parts.append('veg')
+    if args.stratified:
+        suffix_parts.append('strat')
+    if args.use_external:
+        suffix_parts.append('ext')
+    model_name = '_'.join(suffix_parts)
     checkpoint_dir = Path(f'experiments/checkpoints_{model_name}_{timestamp}')
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -524,7 +825,11 @@ def main():
     print(f"  Backbone: {backbone_config['model_name']}")
     print(f"  Image size: {backbone_config['image_size']}")
     print(f"  Use depth: {args.use_depth}")
+    print(f"  Use attention fusion: {args.use_attention}")
+    print(f"  Use veg indices: {args.use_veg_indices}")
     print(f"  Freeze backbone: {args.freeze_backbone}")
+    print(f"  Stratified splits: {args.stratified}")
+    print(f"  External data: {args.use_external}")
     print(f"  Folds: {args.n_folds}")
     print(f"  Epochs: {args.epochs}")
     print(f"  Batch size: {args.batch_size}")
@@ -548,23 +853,58 @@ def main():
 
     # Convert to wide format (one row per image with all targets)
     image_df = df.pivot_table(
-        index=['image_id', 'image_path', 'Sampling_Date', 'State'],
+        index=['image_id', 'image_path', 'Sampling_Date', 'State', 'Species',
+               'Pre_GSHH_NDVI', 'Height_Ave_cm'],
         columns='target_name',
-        values='target'
+        values='target',
+        aggfunc='first'
     ).reset_index()
+
+    print(f"Competition images: {len(image_df)}")
+
+    # Add external data if requested
+    if args.use_external:
+        external_csv = Path('/home/chaot/kaggle/Image2Biomass-Competition/external_data/processed/grassclover_long.csv')
+        if external_csv.exists():
+            print(f"Loading external data from {external_csv}...")
+            ext_df = pd.read_csv(external_csv)
+            ext_df['image_id'] = ext_df['sample_id'].str.split('__').str[0]
+            ext_image_df = ext_df.pivot_table(
+                index=['image_id', 'image_path', 'Sampling_Date', 'State', 'Species',
+                       'Pre_GSHH_NDVI', 'Height_Ave_cm'],
+                columns='target_name',
+                values='target',
+                aggfunc='first'
+            ).reset_index()
+            print(f"External images: {len(ext_image_df)}")
+            image_df = pd.concat([image_df, ext_image_df], ignore_index=True)
+            print(f"Total images: {len(image_df)}")
+        else:
+            print(f"Warning: External data not found at {external_csv}")
 
     print(f"Total images: {len(image_df)}")
 
     # K-fold cross-validation
     print(f"\n{'='*70}")
     print(f"Starting {args.n_folds}-Fold Cross-Validation")
+    if args.stratified:
+        print("Using STRATIFIED GroupKFold splits")
     print(f"{'='*70}")
 
     fold_results = []
 
-    for fold_idx, (train_df, val_df) in get_group_kfold_splits(
-        image_df, n_folds=args.n_folds, group_by='location', random_seed=args.seed
-    ):
+    # Choose splitter based on stratified flag
+    if args.stratified:
+        from src.data.stratified_splitter import get_stratified_group_kfold_splits
+        split_generator = get_stratified_group_kfold_splits(
+            image_df, img_dir, n_folds=args.n_folds, random_seed=args.seed
+        )
+    else:
+        split_generator = get_group_kfold_splits(
+            image_df, n_folds=args.n_folds, group_by='location', random_seed=args.seed
+        )
+
+    for fold_idx, (train_df, val_df) in split_generator:
         result = train_fold(
             fold_idx=fold_idx,
             train_df=train_df,

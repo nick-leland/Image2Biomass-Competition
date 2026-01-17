@@ -13,7 +13,8 @@ PyTorch-based solution for the [CSIRO Image2Biomass Kaggle competition](https://
 | V5 | RGB+Depth Fusion | 0.48 | 0.57 | Depth Anything v2 + external data |
 | V6 | Ensemble (V4+V5) | - | 0.57 | Weighted ensemble (no improvement) |
 | V7 | DINOv2 ViT-Base | 0.50 | 0.58 | Foundation model backbone |
-| **V8** | **DINOv2 + Depth** | **0.50** | **0.62** | Foundation model + depth fusion |
+| **V8** | **DINOv2 + Depth** | **0.50** | **0.62** | **Foundation model + depth fusion** |
+| V9 | Ensemble (V7+V8) + TTA | - | 0.60 | 16-transform TTA hurt performance |
 
 **Current Best: V8 with R² = 0.62**
 
@@ -233,9 +234,11 @@ python scripts/generate_submission_kfold.py --checkpoint_dir experiments/checkpo
 | ViT without proper training | Worse | Needed differential LR + warmup + grad accumulation |
 | SigLIP backbone | Val loss 2.85 | DINOv2 (2.18) worked better |
 | V4+V5 ensemble | No improvement | V6 got same 0.57 as V5 alone |
+| V7+V8 ensemble + 16-TTA | 0.60 (worse) | V9: Aggressive TTA hurt performance vs V8 alone |
 | Aggressive augmentation | Worse | Conservative augmentation better |
 | Hard constraint learning | No improvement | Post-processing works better |
 | Training on competition data only (depth model) | Worse CV but timed out on Kaggle | External data crucial |
+| Stratified splitting | No improvement | Standard GroupKFold worked just as well |
 
 ## CV vs Leaderboard Correlation
 
