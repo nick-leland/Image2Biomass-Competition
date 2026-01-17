@@ -15,6 +15,9 @@ PyTorch-based solution for the [CSIRO Image2Biomass Kaggle competition](https://
 | V7 | DINOv2 ViT-Base | 0.50 | 0.58 | Foundation model backbone |
 | **V8** | **DINOv2 + Depth** | **0.50** | **0.62** | **Foundation model + depth fusion** |
 | V9 | Ensemble (V7+V8) + TTA | - | 0.60 | 16-transform TTA hurt performance |
+| V10 | Attention Fusion | 0.44 | - | Cross-modal attention worse than concat |
+| V11 | Pseudo-labeling | 0.51 | - | 174 pseudo-labeled images, higher variance |
+| V12 | Stacking Ensemble | 0.90* | - | Ridge meta-learner on V4+V7+V8 (*OOF, likely overfitting) |
 
 **Current Best: V8 with R² = 0.62**
 
@@ -241,6 +244,7 @@ python scripts/generate_submission_kfold.py --checkpoint_dir experiments/checkpo
 | Stratified splitting | No improvement | Standard GroupKFold worked just as well |
 | Attention fusion (V10) | CV 0.44 (worse) | Simple concatenation beats cross-modal attention |
 | Pseudo-labeling (V11) | CV 0.51, std 0.15 | Higher variance, no improvement over V8 |
+| Stacking ensemble (V12) | OOF R² 0.90 | Meta-learner heavily weights V4 (overfitting model) |
 
 ## CV vs Leaderboard Correlation
 
@@ -274,8 +278,8 @@ We discovered that **CV score does not directly predict LB score** - the gap bet
 - [x] DINOv2 + Depth fusion (V8: 0.62 - new best!)
 - [x] Attention fusion instead of concatenation (V10: did not improve)
 - [x] Pseudo-labeling on unlabeled external data (V11: did not improve)
-- [ ] More external data sources
-- [ ] Stacking ensemble with meta-learner
+- [x] Stacking ensemble with meta-learner (V12: OOF looks good but may overfit)
+- [ ] More external data sources (searched - none available for pasture biomass)
 
 ## Acknowledgments
 
