@@ -12,10 +12,10 @@ PyTorch-based solution for the [CSIRO Image2Biomass Kaggle competition](https://
 | V4 | MSE Loss + Tuning | 0.74 | 0.50 | Overfitting detected |
 | V5 | RGB+Depth Fusion | 0.48 | 0.57 | Depth Anything v2 + external data |
 | V6 | Ensemble (V4+V5) | - | 0.57 | Weighted ensemble (no improvement) |
-| **V7** | **DINOv2 ViT-Base** | **0.50** | **0.58** | Foundation model backbone |
-| V8 | DINOv2 + Depth | 0.50 | Pending | Foundation model + depth fusion |
+| V7 | DINOv2 ViT-Base | 0.50 | 0.58 | Foundation model backbone |
+| **V8** | **DINOv2 + Depth** | **0.50** | **0.62** | Foundation model + depth fusion |
 
-**Current Best: V7 with R² = 0.58**
+**Current Best: V8 with R² = 0.62**
 
 ## Competition Overview
 
@@ -246,7 +246,7 @@ We discovered that **CV score does not directly predict LB score** - the gap bet
 | V4 (EfficientNetV2) | 0.74 | 0.04 | 0.50 | -0.24 | Severe overfitting |
 | V5 (Depth + external) | 0.48 | 0.30 | 0.57 | +0.09 | Good generalization |
 | V7 (DINOv2) | 0.50 | 0.09 | 0.58 | +0.08 | Good generalization |
-| V8 (DINOv2 + Depth) | 0.50 | 0.07 | Pending | ? | Lowest variance |
+| **V8 (DINOv2 + Depth)** | **0.50** | **0.07** | **0.62** | **+0.12** | **Best generalization** |
 
 ### Key Insights
 
@@ -265,8 +265,8 @@ We discovered that **CV score does not directly predict LB score** - the gap bet
 
 ## Future Ideas
 
-- [x] Try DINOv2 or SigLIP backbones (DINOv2 worked best - V7)
-- [x] DINOv2 + Depth fusion (V8 - pending results)
+- [x] Try DINOv2 or SigLIP backbones (DINOv2 worked best - V7: 0.58)
+- [x] DINOv2 + Depth fusion (V8: 0.62 - new best!)
 - [ ] Attention fusion instead of concatenation
 - [ ] More external data sources
 - [ ] Pseudo-labeling on test set
