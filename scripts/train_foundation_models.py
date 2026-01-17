@@ -754,6 +754,8 @@ def main():
                         help='Use stratified group k-fold splits')
     parser.add_argument('--use_external', action='store_true',
                         help='Include external GrassClover data')
+    parser.add_argument('--use_pseudo', action='store_true',
+                        help='Include pseudo-labeled data (requires --use_external)')
     parser.add_argument('--use_veg_indices', action='store_true',
                         help='Add vegetation indices as features')
     parser.add_argument('--use_attention', action='store_true',
@@ -779,6 +781,7 @@ def main():
         'freeze_backbone': args.freeze_backbone,
         'stratified': args.stratified,
         'use_external': args.use_external,
+        'use_pseudo': args.use_pseudo,
         'n_folds': args.n_folds,
         'num_epochs': args.epochs,
         'batch_size': args.batch_size,
@@ -810,6 +813,8 @@ def main():
         suffix_parts.append('strat')
     if args.use_external:
         suffix_parts.append('ext')
+    if args.use_pseudo:
+        suffix_parts.append('pseudo')
     model_name = '_'.join(suffix_parts)
     checkpoint_dir = Path(f'experiments/checkpoints_{model_name}_{timestamp}')
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -830,6 +835,7 @@ def main():
     print(f"  Freeze backbone: {args.freeze_backbone}")
     print(f"  Stratified splits: {args.stratified}")
     print(f"  External data: {args.use_external}")
+    print(f"  Pseudo-labeled data: {args.use_pseudo}")
     print(f"  Folds: {args.n_folds}")
     print(f"  Epochs: {args.epochs}")
     print(f"  Batch size: {args.batch_size}")
@@ -876,11 +882,28 @@ def main():
                 values='target',
                 aggfunc='first'
             ).reset_index()
-            print(f"External images: {len(ext_image_df)}")
+            print(f"External labeled images: {len(ext_image_df)}")
             image_df = pd.concat([image_df, ext_image_df], ignore_index=True)
-            print(f"Total images: {len(image_df)}")
         else:
             print(f"Warning: External data not found at {external_csv}")
+
+        # Add pseudo-labeled data if available
+        pseudo_csv = Path('/home/chaot/kaggle/Image2Biomass-Competition/external_data/processed/pseudo_labels_long.csv')
+        if pseudo_csv.exists() and args.use_pseudo:
+            print(f"Loading pseudo-labeled data from {pseudo_csv}...")
+            pseudo_df = pd.read_csv(pseudo_csv)
+            pseudo_df['image_id'] = pseudo_df['sample_id'].str.split('__').str[0]
+            pseudo_image_df = pseudo_df.pivot_table(
+                index=['image_id', 'image_path', 'Sampling_Date', 'State', 'Species',
+                       'Pre_GSHH_NDVI', 'Height_Ave_cm'],
+                columns='target_name',
+                values='target',
+                aggfunc='first'
+            ).reset_index()
+            print(f"Pseudo-labeled images: {len(pseudo_image_df)}")
+            image_df = pd.concat([image_df, pseudo_image_df], ignore_index=True)
+        elif args.use_pseudo:
+            print(f"Warning: Pseudo-labeled data not found at {pseudo_csv}")
 
     print(f"Total images: {len(image_df)}")
 
